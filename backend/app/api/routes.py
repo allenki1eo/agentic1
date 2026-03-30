@@ -17,6 +17,7 @@ from app.models.schemas import (
 from app.agents.workflow import orchestrator
 from app.agents.formula_agent import formula_agent
 from app.agents.intent_classifier import intent_classifier
+from app.agents.direct_generator import generate as direct_generate
 from app.core.config import settings
 import logging
 
@@ -32,19 +33,38 @@ workflow_states = {}
 
 @router.post("/generate", response_model=GenerationResponse)
 async def generate_document(request: GenerationRequest):
-    """Generate a document based on user request."""
-    
+    """Generate a document based on user request using direct single-call generation."""
+
+    workflow_id = str(uuid.uuid4())[:8]
+
     try:
-        # Execute workflow
+        # ── Primary path: single LLM call that generates full, prompt-specific content ──
+        final_output = await direct_generate(request.prompt)
+
+        if final_output.get("content"):
+            file_id = str(uuid.uuid4())[:12]
+            generated_files[file_id] = final_output
+
+            return GenerationResponse(
+                workflow_id=workflow_id,
+                status="completed",
+                message=f"Successfully generated {final_output.get('filename', 'document')}",
+                download_url=f"/api/download/{file_id}",
+                preview_data={
+                    "filename": final_output.get("filename"),
+                    "size": final_output.get("size"),
+                    "mime_type": final_output.get("mime_type"),
+                }
+            )
+
+        # ── Fallback: multi-agent pipeline ──
+        logger.warning("DirectGenerator returned no content, falling back to orchestrator")
         workflow_state = await orchestrator.execute(
             user_input=request.prompt,
             file_ids=request.file_ids
         )
-        
-        # Store workflow state
         workflow_states[workflow_state.workflow_id] = workflow_state
-        
-        # Check for errors
+
         if workflow_state.error:
             return GenerationResponse(
                 workflow_id=workflow_state.workflow_id,
@@ -52,35 +72,33 @@ async def generate_document(request: GenerationRequest):
                 message=f"Generation failed: {workflow_state.error}",
                 error=workflow_state.error
             )
-        
-        # Store generated file
-        final_output = workflow_state.final_output or {}
-        if final_output.get("content"):
+
+        fallback_output = workflow_state.final_output or {}
+        if fallback_output.get("content"):
             file_id = str(uuid.uuid4())[:12]
-            generated_files[file_id] = final_output
-            
+            generated_files[file_id] = fallback_output
             return GenerationResponse(
                 workflow_id=workflow_state.workflow_id,
                 status="completed",
-                message=f"Successfully generated {final_output.get('filename', 'document')}",
+                message=f"Successfully generated {fallback_output.get('filename', 'document')}",
                 download_url=f"/api/download/{file_id}",
                 preview_data={
-                    "filename": final_output.get("filename"),
-                    "size": final_output.get("size"),
-                    "mime_type": final_output.get("mime_type")
+                    "filename": fallback_output.get("filename"),
+                    "size": fallback_output.get("size"),
+                    "mime_type": fallback_output.get("mime_type"),
                 }
             )
-        
+
         return GenerationResponse(
-            workflow_id=workflow_state.workflow_id,
-            status="completed",
-            message="Generation completed but no output was produced"
+            workflow_id=workflow_id,
+            status="failed",
+            message="Could not generate document. Please try rephrasing your request.",
+            error="No output produced"
         )
-        
+
     except Exception as e:
         import traceback
-        error_detail = f"{str(e)}\n{traceback.format_exc()}"
-        logger.error(f"Generation failed: {error_detail}")
+        logger.error(f"Generation failed: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
