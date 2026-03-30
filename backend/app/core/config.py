@@ -11,13 +11,13 @@ class Settings(BaseSettings):
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     # Model Configuration - Free model configurations from OpenRouter
-    PRIMARY_MODEL: str = "arcee-ai/trinity-large-preview:free"
-    CODING_MODEL: str = "arcee-ai/trinity-large-preview:free"
-    REASONING_MODEL: str = "arcee-ai/trinity-large-preview:free"
+    PRIMARY_MODEL: str = "google/gemini-2.0-flash-exp:free"
+    CODING_MODEL: str = "google/gemini-2.0-flash-exp:free"
+    REASONING_MODEL: str = "deepseek/deepseek-r1:free"
     FALLBACK_MODELS: List[str] = [
-        "google/gemini-2.0-flash-exp:free",
-        "deepseek/deepseek-r1:free",
-        "meta-llama/llama-3.3-70b-instruct:free"
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "arcee-ai/trinity-large-preview:free",
+        "deepseek/deepseek-r1:free"
     ]
     
     # Rate Limiting
