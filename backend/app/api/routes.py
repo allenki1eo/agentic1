@@ -90,12 +90,13 @@ async def generate_document_stream(request: GenerationRequest):
     
     async def event_generator():
         workflow_id = str(uuid.uuid4())[:8]
-        
+        progress_events: list = []
+
         # Send initial event
         yield f"data: {json.dumps({'type': 'start', 'workflow_id': workflow_id, 'timestamp': datetime.utcnow().isoformat()})}\n\n"
-        
+
         try:
-            # Progress callback
+            # Progress callback — collects events; event_generator flushes them after execute()
             async def progress_callback(stage: str, data: dict):
                 event = {
                     "type": "progress",
@@ -104,14 +105,18 @@ async def generate_document_stream(request: GenerationRequest):
                     "data": data,
                     "timestamp": datetime.utcnow().isoformat()
                 }
-                yield f"data: {json.dumps(event)}\n\n"
-            
-            # Execute workflow with streaming
+                progress_events.append(f"data: {json.dumps(event)}\n\n")
+
+            # Execute workflow
             workflow_state = await orchestrator.execute(
                 user_input=request.prompt,
                 file_ids=request.file_ids,
                 progress_callback=progress_callback
             )
+
+            # Flush collected progress events
+            for evt in progress_events:
+                yield evt
             
             # Store and send completion
             workflow_states[workflow_id] = workflow_state
@@ -379,6 +384,87 @@ async def preview_file(file_id: str, max_length: int = Query(5000, description="
     except Exception as e:
         logger.error(f"Preview extraction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to extract preview: {str(e)}")
+
+
+@router.post("/edit/{file_id}", response_model=GenerationResponse)
+async def edit_document(file_id: str, request: dict):
+    """Edit an existing generated document using natural language instructions."""
+
+    if file_id not in generated_files:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    edit_instructions = request.get("instructions", "")
+    if not edit_instructions:
+        raise HTTPException(status_code=400, detail="No edit instructions provided")
+
+    file_data = generated_files[file_id]
+    original_filename = file_data.get("filename", "document")
+    original_mime = file_data.get("mime_type", "")
+
+    # Determine format hint from mime type
+    if "spreadsheet" in original_mime or "excel" in original_mime:
+        fmt_hint = "Excel spreadsheet"
+        fmt_code = "excel"
+    elif "wordprocessing" in original_mime or "word" in original_mime:
+        fmt_hint = "Word document"
+        fmt_code = "word"
+    elif "presentation" in original_mime or "powerpoint" in original_mime:
+        fmt_hint = "PowerPoint presentation"
+        fmt_code = "powerpoint"
+    else:
+        fmt_hint = "document"
+        fmt_code = "auto"
+
+    # Build a new prompt that describes the edit
+    edit_prompt = (
+        f"Edit the existing {fmt_hint} named '{original_filename}'. "
+        f"Apply the following modifications: {edit_instructions}. "
+        f"Regenerate the complete updated {fmt_hint} with all changes applied."
+    )
+
+    try:
+        workflow_state = await orchestrator.execute(
+            user_input=edit_prompt,
+            file_ids=[]
+        )
+
+        workflow_states[workflow_state.workflow_id] = workflow_state
+
+        if workflow_state.error:
+            return GenerationResponse(
+                workflow_id=workflow_state.workflow_id,
+                status="failed",
+                message=f"Edit failed: {workflow_state.error}",
+                error=workflow_state.error
+            )
+
+        final_output = workflow_state.final_output or {}
+        if final_output.get("content"):
+            new_file_id = str(uuid.uuid4())[:12]
+            generated_files[new_file_id] = final_output
+
+            return GenerationResponse(
+                workflow_id=workflow_state.workflow_id,
+                status="completed",
+                message=f"Document updated: {final_output.get('filename', 'document')}",
+                download_url=f"/api/download/{new_file_id}",
+                preview_data={
+                    "filename": final_output.get("filename"),
+                    "size": final_output.get("size"),
+                    "mime_type": final_output.get("mime_type")
+                }
+            )
+
+        return GenerationResponse(
+            workflow_id=workflow_state.workflow_id,
+            status="completed",
+            message="Edit completed but no output was produced"
+        )
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Edit failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/test-generate")

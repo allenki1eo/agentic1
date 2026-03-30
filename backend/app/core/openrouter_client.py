@@ -171,20 +171,61 @@ class OpenRouterClient:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         
-        # Add reasoning for Trinity model
-        if "trinity" in model.lower():
+        # Add reasoning for Trinity model (skip when json_mode is active — they conflict)
+        if "trinity" in model.lower() and not json_mode:
             kwargs["extra_body"] = {"reasoning": {"enabled": True}}
-        
+
         logger.info(f"Using model: {model}")
-        logger.info(f"Request kwargs: {kwargs}")
-        
+
         try:
             response = await self.client.chat.completions.create(**kwargs)
             logger.info(f"Response received from {model}")
-            return response.choices[0].message.content
+            content = response.choices[0].message.content or ""
+            # Normalise: strip markdown code fences that some models wrap JSON in
+            if json_mode:
+                content = self._extract_json(content)
+            return content
         except Exception as e:
             logger.error(f"API call failed for model {model}: {e}")
+            # Try next available model in the preferred list
+            remaining = [m for m in preferred if m != model]
+            if remaining:
+                fallback_model = await self._wait_for_available_model(remaining)
+                self._last_model_used = fallback_model
+                kwargs["model"] = fallback_model
+                # Re-apply (or remove) extra_body for the fallback
+                if "extra_body" in kwargs:
+                    del kwargs["extra_body"]
+                if "trinity" in fallback_model.lower() and not json_mode:
+                    kwargs["extra_body"] = {"reasoning": {"enabled": True}}
+                logger.info(f"Retrying with fallback model: {fallback_model}")
+                response = await self.client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content or ""
+                if json_mode:
+                    content = self._extract_json(content)
+                return content
             raise
+
+    def _extract_json(self, text: str) -> str:
+        """Extract JSON object from a response that may contain markdown fences or prose."""
+        import re
+        # Strip ```json ... ``` or ``` ... ``` wrappers
+        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fence:
+            return fence.group(1)
+        # Strip ```json ... ``` for arrays
+        fence_arr = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+        if fence_arr:
+            return fence_arr.group(1)
+        # Find last outermost JSON object
+        obj = re.search(r"\{.*\}", text, re.DOTALL)
+        if obj:
+            return obj.group(0)
+        # Find JSON array
+        arr = re.search(r"\[.*\]", text, re.DOTALL)
+        if arr:
+            return arr.group(0)
+        return text
     
     async def stream_complete(
         self,
